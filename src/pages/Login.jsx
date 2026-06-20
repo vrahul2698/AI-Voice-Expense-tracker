@@ -50,9 +50,9 @@ export default function Login() {
     };
   }, []);
 
-const handleGoogleLogin = () => {
-  window.location.href = `${import.meta.env.VITE_API_URL}/auth/google`;
-};
+  const handleGoogleLogin = () => {
+    window.location.href = `${import.meta.env.VITE_API_URL}/auth/google`;
+  };
 
   return (
     <div style={s.root}>
@@ -63,22 +63,22 @@ const handleGoogleLogin = () => {
       <div style={s.orb2} />
       <div style={s.orb3} />
 
-      <div style={s.container}>
+      <div className="vl-container" style={s.container}>
         {/* Left — branding */}
-        <div style={s.left}>
-          <div style={s.badge}>AI-POWERED EXPENSE TRACKING</div>
-          <h1 style={s.headline}>
+        <div className="vl-left" style={s.left}>
+          <div className="vl-badge" style={s.badge}>AI-POWERED EXPENSE TRACKING</div>
+          <h1 className="vl-headline" style={s.headline}>
             <span style={s.headlineAccent}>Speak.</span>
             <br />
             We handle
             <br />
             the rest.
           </h1>
-          <p style={s.subtext}>
+          <p className="vl-subtext" style={s.subtext}>
             Say "spent 200 on tea" and watch it land in your Google Sheet instantly. No typing, no apps, no friction.
           </p>
 
-          <div style={s.waveWrap}>
+          <div className="vl-wavewrap" style={s.waveWrap}>
             {[...Array(28)].map((_, i) => (
               <div
                 key={i}
@@ -94,7 +94,7 @@ const handleGoogleLogin = () => {
         </div>
 
         {/* Right — card */}
-        <div style={s.card}>
+        <div className="vl-card" style={s.card}>
           <div style={s.cardGlow} />
 
           <div style={s.iconWrap}>
@@ -155,6 +155,56 @@ const handleGoogleLogin = () => {
           from { opacity: 0; transform: translateY(24px); }
           to { opacity: 1; transform: translateY(0); }
         }
+
+        /* ── Responsive overrides ──────────────────────────────────────── */
+        /* Inline styles set the desktop baseline; these rules win on smaller
+           screens because a class selector here is loaded after, and we only
+           touch the properties that actually break layout on mobile. */
+
+        @media (max-width: 900px) {
+          .vl-container {
+            flex-direction: column !important;
+            gap: 40px !important;
+            text-align: center;
+          }
+          .vl-left {
+            align-items: center !important;
+          }
+          .vl-badge {
+            margin: 0 auto;
+          }
+          .vl-wavewrap {
+            justify-content: center;
+          }
+          .vl-card {
+            width: 100% !important;
+            max-width: 440px;
+            box-sizing: border-box;
+          }
+        }
+
+        @media (max-width: 480px) {
+          .vl-headline {
+            font-size: clamp(36px, 11vw, 52px) !important;
+            line-height: 1.05 !important;
+          }
+          .vl-subtext {
+            font-size: 14px !important;
+            padding: 0 8px;
+          }
+          .vl-card {
+            padding: 32px 24px !important;
+            border-radius: 20px !important;
+          }
+          .vl-wavewrap {
+            height: 36px !important;
+          }
+        }
+
+        /* Prevent any child from forcing horizontal scroll on narrow viewports */
+        html, body {
+          overflow-x: hidden;
+        }
       `}</style>
     </div>
   );
@@ -171,7 +221,7 @@ const s = {
   badge: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 10, fontWeight: 600, letterSpacing: 2, color: "#8b5cf6", border: "1px solid rgba(139,92,246,0.3)", padding: "6px 14px", borderRadius: 20, width: "fit-content", background: "rgba(139,92,246,0.08)" },
   headline: { fontFamily: "'Instrument Serif', serif", fontSize: "clamp(52px, 6vw, 88px)", lineHeight: 1.0, color: "#f0f0fa", margin: 0, fontWeight: 400 },
   headlineAccent: { fontFamily: "'Instrument Serif', serif", fontStyle: "italic", color: "#a78bfa" },
-  subtext: { fontSize: 16, color: "#6b6b8a", lineHeight: 1.7, maxWidth: 420, margin: 0 },
+  subtext: { fontSize: 16, color: "#6b6b8a", lineHeight: 1.7, maxWidth: 420, margin: "0 auto" },
   waveWrap: { display: "flex", alignItems: "center", gap: 3, height: 48, marginTop: 8 },
   waveBar: { width: 3, background: "linear-gradient(to top, #8b5cf6, #06b6d4)", borderRadius: 4, animation: "waveAnim 1.4s ease-in-out infinite", transformOrigin: "bottom" },
   card: { position: "relative", background: "rgba(255,255,255,0.03)", backdropFilter: "blur(24px)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 28, padding: "44px 40px", width: 420, flexShrink: 0, overflow: "hidden" },
