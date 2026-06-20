@@ -4,7 +4,7 @@ import Login from "./pages/Login";           // Vite resolves .jsx automatically
 import Dashboard from "./pages/Dashboard";
 import AuthCallback from "./pages/AuthCallback";
 import { AuthProvider, useAuth } from "./context/AuthContext";
-
+  import axios from "axios";
 function PrivateRoute({ children }) {
   const { user, loading } = useAuth();
   if (loading) return (
@@ -14,7 +14,7 @@ function PrivateRoute({ children }) {
   );
   return user ? children : <Navigate to="/login" />;
 }
-
+axios.defaults.baseURL = import.meta.env.VITE_API_URL;
 export default function App() {
   return (
     <AuthProvider>

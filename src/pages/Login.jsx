@@ -50,9 +50,9 @@ export default function Login() {
     };
   }, []);
 
-  const handleGoogleLogin = () => {
-    window.location.href = "http://localhost:5000/auth/google";
-  };
+const handleGoogleLogin = () => {
+  window.location.href = `${import.meta.env.VITE_API_URL}/auth/google`;
+};
 
   return (
     <div style={s.root}>
