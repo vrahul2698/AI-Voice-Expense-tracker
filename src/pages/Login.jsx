@@ -1,21 +1,29 @@
 import React, { useEffect, useRef, useState } from "react";
 
-const PHRASE = "spent 200 on tea";
+const PHRASES = {
+  en: { typed: "spent 200 on tea", item: "Tea", category: "Food & Drink" },
+  ta: { typed: "டீக்கு 200 ரூபாய் செலவு", item: "டீ", category: "உணவு" },
+};
 
 export default function Login() {
   const canvasRef = useRef(null);
+  const [lang, setLang] = useState("en");
   const [typed, setTyped] = useState("");
   const [showLine, setShowLine] = useState(false);
 
   // Typewriter effect — the spoken phrase prints itself out, then resolves
-  // into a line item, like a register printing a receipt line.
+  // into a line item, like a register printing a receipt line. Restarts
+  // whenever the language toggle changes, using that language's phrase.
   useEffect(() => {
+    const phrase = PHRASES[lang].typed;
     let i = 0;
     let timeoutId;
+    setTyped("");
+    setShowLine(false);
 
     const type = () => {
-      if (i <= PHRASE.length) {
-        setTyped(PHRASE.slice(0, i));
+      if (i <= phrase.length) {
+        setTyped(phrase.slice(0, i));
         i++;
         timeoutId = setTimeout(type, 65);
       } else {
@@ -28,7 +36,7 @@ export default function Login() {
       clearTimeout(startDelay);
       clearTimeout(timeoutId);
     };
-  }, []);
+  }, [lang]);
 
   // Faint paper-grain dots, drawn once — subtle, not a particle simulation.
   useEffect(() => {
@@ -69,15 +77,32 @@ export default function Login() {
       <div className="vl-container" style={s.container}>
         {/* Left — masthead */}
         <div className="vl-left" style={s.left}>
-          <div className="vl-eyebrow" style={s.eyebrow}>NO TAPS. NO FORMS. JUST TALK.</div>
+          <div style={s.eyebrowRow}>
+            <div className="vl-eyebrow" style={s.eyebrow}>NO TAPS. NO FORMS. JUST TALK.</div>
+            <div style={s.langSwitch}>
+              <button
+                style={{ ...s.langSwitchBtn, ...(lang === "en" ? s.langSwitchBtnActive : {}) }}
+                onClick={() => setLang("en")}
+              >
+                EN
+              </button>
+              <button
+                style={{ ...s.langSwitchBtn, ...(lang === "ta" ? s.langSwitchBtnActive : {}) }}
+                onClick={() => setLang("ta")}
+              >
+                தமிழ்
+              </button>
+            </div>
+          </div>
 
           <h1 className="vl-headline" style={s.headline}>
             Speak.<br />We handle<br />the rest.
           </h1>
 
           <p className="vl-subtext" style={s.subtext}>
-            Say "spent 200 on tea" and watch it land in your Google Sheet instantly.
-            No typing, no apps, no friction.
+            {lang === "ta"
+              ? 'டீக்கு 200 ரூபாய் செலவு என்று சொல்லுங்கள் — உடனே உங்கள் Google Sheet-ல் பதிவாகும். தட்டச்சு இல்லை, ஆப் இல்லை, தடையே இல்லை.'
+              : 'Say "spent 200 on tea" and watch it land in your Google Sheet instantly. No typing, no apps, no friction.'}
           </p>
 
           <div className="vl-typer" style={s.typerBox}>
@@ -90,9 +115,9 @@ export default function Login() {
             </div>
             {showLine && (
               <div style={s.resolvedLine}>
-                <span>Tea</span>
+                <span>{PHRASES[lang].item}</span>
                 <span style={s.dots} />
-                <span>Food &amp; Drink</span>
+                <span>{PHRASES[lang].category}</span>
                 <span style={s.amount}>₹200</span>
               </div>
             )}
@@ -221,6 +246,10 @@ const s = {
     animation: "fadeUp 0.6s ease forwards",
   },
   left: { flex: 1, display: "flex", flexDirection: "column", gap: 20, minWidth: 0 },
+  eyebrowRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" },
+  langSwitch: { display: "flex", gap: 4, background: "#FFFDF8", border: `1px solid ${lineColor}`, borderRadius: 6, padding: 3 },
+  langSwitchBtn: { fontFamily: "'Space Mono', monospace", fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: inkFaded, background: "none", border: "none", borderRadius: 4, padding: "5px 10px", cursor: "pointer" },
+  langSwitchBtnActive: { background: ink, color: paper },
   eyebrow: {
     display: "inline-flex",
     fontFamily: "'Space Mono', monospace",

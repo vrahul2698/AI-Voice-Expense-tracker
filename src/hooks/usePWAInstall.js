@@ -6,17 +6,14 @@ export function usePWAInstall() {
   const [isIOS, setIsIOS] = useState(false);
 
   useEffect(() => {
-    // Check if already installed (standalone mode)
     if (window.matchMedia("(display-mode: standalone)").matches) {
       setIsInstalled(true);
       return;
     }
 
-    // Check iOS
     const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
     setIsIOS(ios);
 
-    // Capture install prompt (Android/Chrome)
     const handler = (e) => {
       e.preventDefault();
       setInstallPrompt(e);
@@ -24,7 +21,6 @@ export function usePWAInstall() {
 
     window.addEventListener("beforeinstallprompt", handler);
 
-    // Listen for successful install
     window.addEventListener("appinstalled", () => {
       setIsInstalled(true);
       setInstallPrompt(null);

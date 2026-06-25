@@ -2,21 +2,68 @@ import React, { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 import { useAudioRecorder } from "../hooks/useAudioRecorder";
+import { strings, categoryLabel } from "../i18n/strings";
 
 const CATEGORY_ICONS = {
   "Food & Drink": "🍽️", Transport: "🚗", Shopping: "🛍️",
   Bills: "💡", Entertainment: "🎬", Health: "💊", Education: "📚", Other: "📦",
 };
 
+const CATEGORY_LIST = Object.keys(CATEGORY_ICONS);
+
 export default function Dashboard() {
   const { user, logout, refreshUser } = useAuth();
   const { isRecording, audioBlob, error: micError, startRecording, stopRecording } = useAudioRecorder();
   const [status, setStatus] = useState("idle");
-  const [result, setResult] = useState(null);
+  const [pending, setPending] = useState(null); // { transcription, expense, lang } — awaiting confirm
+  const [result, setResult] = useState(null);   // last confirmed/failed result, for display
   const [history, setHistory] = useState([]);
   const [textInput, setTextInput] = useState("");
   const [activeTab, setActiveTab] = useState("voice");
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState(null);
+  const [historyWarning, setHistoryWarning] = useState(null);
+  const [analytics, setAnalytics] = useState(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState(null);
   const processingRef = useRef(false);
+
+  // Language preference — defaults to whatever the backend has saved for
+  // this user, falls back to English. Persisted via PATCH /auth/language.
+  const [lang, setLang] = useState(user?.language || "en");
+  const t = strings[lang];
+
+  useEffect(() => {
+    if (user?.language) setLang(user.language);
+  }, [user?.language]);
+
+  // Fetch analytics the first time the Summary tab is opened, and again any
+  // time a new expense is confirmed/edited/deleted while it's the active tab
+  // (those actions already call refreshUser(); this keeps Summary in sync
+  // with them without a separate polling loop).
+  const fetchAnalytics = async () => {
+    setAnalyticsLoading(true);
+    setAnalyticsError(null);
+    try {
+      const res = await axios.get("/api/expenses/analytics");
+      setAnalytics(res.data.analytics);
+    } catch (err) {
+      setAnalyticsError(err.response?.data?.error || "Could not load summary.");
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === "summary") fetchAnalytics();
+  }, [activeTab]);
+
+  // Call after any action that changes expense data, so Summary stays
+  // current even if the user doesn't leave and re-open that tab.
+  const refreshUserAndAnalytics = () => {
+    refreshUser();
+    if (activeTab === "summary") fetchAnalytics();
+  };
 
   useEffect(() => {
     if (audioBlob && !processingRef.current) {
@@ -25,27 +72,43 @@ export default function Dashboard() {
     }
   }, [audioBlob]);
 
+  const changeLanguage = async (newLang) => {
+    setLang(newLang);
+    try {
+      await axios.patch("/auth/language", { language: newLang });
+      refreshUser();
+    } catch {
+      // Non-fatal — UI still switches locally even if the save fails;
+      // it'll just retry from the user's default next time they toggle.
+    }
+  };
+
+  // ── Voice: record → preview (no save yet) ──────────────────────────────
   const sendAudio = async (blob) => {
     setStatus("processing");
     setResult(null);
+    setPending(null);
     const formData = new FormData();
     formData.append("audio", blob, "recording.webm");
+    formData.append("lang", lang);
     try {
-      const res = await axios.post("/api/expenses/audio", formData);
-      handleSuccess(res.data);
+      const res = await axios.post("/api/expenses/audio/preview", formData);
+      handlePreview(res.data);
     } catch (err) {
       setStatus("error");
       setResult({ error: err.response?.data?.error || "Server error" });
     }
   };
 
+  // ── Text: type → preview (no save yet) ──────────────────────────────────
   const sendText = async () => {
     if (!textInput.trim()) return;
     setStatus("processing");
     setResult(null);
+    setPending(null);
     try {
-      const res = await axios.post("/api/expenses/text", { text: textInput });
-      handleSuccess(res.data);
+      const res = await axios.post("/api/expenses/text/preview", { text: textInput, lang });
+      handlePreview(res.data);
       setTextInput("");
     } catch (err) {
       setStatus("error");
@@ -53,36 +116,106 @@ export default function Dashboard() {
     }
   };
 
-  const handleSuccess = (data) => {
-    setResult(data);
-    setStatus(data.success ? "success" : "error");
+  const handlePreview = (data) => {
     if (data.success && data.expense) {
-      setHistory((prev) => [
-        { ...data.expense, transcription: data.transcription, id: Date.now() },
-        ...prev.slice(0, 19),
-      ]);
-      refreshUser();
+      setPending({ transcription: data.transcription, expense: data.expense, lang: data.lang || lang });
+      setStatus("confirming");
+    } else {
+      setStatus("error");
+      setResult({ error: data.message || "Could not detect an expense.", transcription: data.transcription });
     }
   };
 
-  // ── Key fix: never disable the button while recording ──
+  // ── User reviewed the preview — actually save now ───────────────────────
+  const confirmPending = async () => {
+    if (!pending) return;
+    setStatus("processing");
+    try {
+      const res = await axios.post("/api/expenses/confirm", {
+        expense: pending.expense,
+        transcription: pending.transcription,
+        lang: pending.lang,
+      });
+      setResult({ success: true, expense: res.data.expense, transcription: pending.transcription });
+      setStatus("success");
+      setHistory((prev) => [
+        { ...res.data.expense, transcription: pending.transcription, id: res.data.expense._id || Date.now() },
+        ...prev.slice(0, 19),
+      ]);
+      setPending(null);
+      refreshUserAndAnalytics();
+    } catch (err) {
+      setStatus("error");
+      setResult({ error: err.response?.data?.error || "Server error" });
+    }
+  };
+
+  const discardPending = () => {
+    setPending(null);
+    setStatus("idle");
+    setResult(null);
+  };
+
+  const updatePendingField = (field, value) => {
+    setPending((prev) => ({ ...prev, expense: { ...prev.expense, [field]: value } }));
+  };
+
+  // ── History: edit / delete ──────────────────────────────────────────────
+  const startEdit = (item) => {
+    setEditingId(item.id);
+    setEditDraft({ item: item.item, category: item.category, amount: item.amount, date: item.date });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditDraft(null);
+  };
+
+  const saveEdit = async (id) => {
+    try {
+      const res = await axios.patch(`/api/expenses/${id}`, editDraft);
+      setHistory((prev) => prev.map((h) => (h.id === id ? { ...h, ...res.data.expense } : h)));
+      refreshUserAndAnalytics();
+    } catch (err) {
+      console.error("Edit failed:", err.response?.data?.error || err.message);
+    } finally {
+      cancelEdit();
+    }
+  };
+
+  const deleteExpense = async (id) => {
+    if (!window.confirm(t.confirmDelete)) return;
+    try {
+      const res = await axios.delete(`/api/expenses/${id}`);
+      setHistory((prev) => prev.filter((h) => h.id !== id));
+      refreshUserAndAnalytics();
+      // Non-fatal — the expense is gone from the app, but the Sheet row
+      // delete failed (e.g. transient API error). Let the user know so
+      // they're not confused later by a stale row in their spreadsheet.
+      setHistoryWarning(res.data.sheetWarning || null);
+    } catch (err) {
+      console.error("Delete failed:", err.response?.data?.error || err.message);
+    }
+  };
+
   const handleMicClick = () => {
     if (isRecording) {
-      stopRecording();          // stop first
-      setStatus("processing");  // then show processing
+      stopRecording();
+      setStatus("processing");
     } else {
-      if (status === "processing") return; // don't start while processing
+      if (status === "processing" || status === "confirming") return;
       startRecording();
       setStatus("recording");
       setResult(null);
+      setPending(null);
     }
   };
 
   const getMicLabel = () => {
-    if (status === "processing") return "Transcribing & extracting...";
-    if (isRecording) return "🔴 Recording... tap to stop";
-    if (status === "success") return "✅ Done! Tap to record again";
-    return "Tap mic to start recording";
+    if (status === "processing") return t.micProcessing;
+    if (isRecording) return t.micRecording;
+    if (status === "success") return t.micSuccess;
+    return t.micIdle;
   };
 
   return (
@@ -92,17 +225,18 @@ export default function Dashboard() {
         <div style={s.headerLeft}>
           <span style={{ fontSize: 24 }}>🎙️</span>
           <div>
-            <div style={s.appName}>VoiceLog</div>
+            <div style={s.appName}>{t.appName}</div>
             <div style={s.userEmail}>{user?.email}</div>
           </div>
         </div>
         <div style={s.headerRight}>
+          <LanguageToggle lang={lang} onChange={changeLanguage} />
           {user?.sheetUrl && (
             <a href={user.sheetUrl} target="_blank" rel="noreferrer" style={s.sheetBtn}>
-              📊 Open Sheet
+              📊 {t.openSheet}
             </a>
           )}
-          <button onClick={logout} style={s.logoutBtn}>Sign out</button>
+          <button onClick={logout} style={s.logoutBtn}>{t.signOut}</button>
         </div>
       </header>
 
@@ -110,29 +244,35 @@ export default function Dashboard() {
       <div style={s.statsBar}>
         <div style={s.stat}>
           <div style={s.statNum}>{user?.totalExpenses || 0}</div>
-          <div style={s.statLabel}>Total Logged</div>
+          <div style={s.statLabel}>{t.totalLogged}</div>
         </div>
         <div style={s.statDivider} />
         <div style={s.stat}>
           <div style={s.statNum}>₹{(user?.totalAmount || 0).toLocaleString("en-IN")}</div>
-          <div style={s.statLabel}>Total Spent</div>
+          <div style={s.statLabel}>{t.totalSpent}</div>
         </div>
         <div style={s.statDivider} />
         <div style={s.stat}>
-          <div style={{ ...s.statNum, fontSize: 12, color: "#00d4aa" }}>✅ Auto-synced</div>
-          <div style={s.statLabel}>Google Sheets</div>
+          <div style={{ ...s.statNum, fontSize: 12, color: "#00d4aa" }}>✅ {t.autoSynced}</div>
+          <div style={s.statLabel}>{t.googleSheets}</div>
         </div>
       </div>
 
       {/* Tabs */}
       <div style={s.tabs}>
-        {["voice", "text", "history"].map((tab) => (
+        {["voice", "text", "summary", "history"].map((tab) => (
           <button
             key={tab}
             style={{ ...s.tab, ...(activeTab === tab ? s.tabActive : {}) }}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === "voice" ? "🎤 Voice" : tab === "text" ? "⌨️ Text" : `📋 History${history.length ? ` (${history.length})` : ""}`}
+            {tab === "voice"
+              ? `🎤 ${t.voiceTab}`
+              : tab === "text"
+              ? `⌨️ ${t.textTab}`
+              : tab === "summary"
+              ? `📊 ${t.summaryTab}`
+              : `📋 ${t.historyTab}${history.length ? ` (${history.length})` : ""}`}
           </button>
         ))}
       </div>
@@ -149,7 +289,6 @@ export default function Dashboard() {
                     <div style={s.pulse2} />
                   </>
                 )}
-                {/* NEVER disabled when recording so stop always works */}
                 <button
                   style={{
                     ...s.micBtn,
@@ -170,27 +309,36 @@ export default function Dashboard() {
 
               <p style={s.micLabel}>{getMicLabel()}</p>
 
-              {/* Recording timer indicator */}
               {isRecording && (
                 <div style={s.recordingBadge}>
                   <span style={s.recordingDot} /> RECORDING
                 </div>
               )}
 
-              <div style={s.exampleBox}>
-                <div style={s.exampleTitle}>Try saying:</div>
-                {[
-                  "Today I spent 200 on tea",
-                  "Paid 500 for auto rickshaw",
-                  "Bought groceries for 1200",
-                ].map((ex) => (
-                  <div key={ex} style={s.exampleLine}>"{ex}"</div>
-                ))}
-              </div>
+              {!pending && (
+                <div style={s.exampleBox}>
+                  <div style={s.exampleTitle}>{t.tryString}</div>
+                  {t.examples.map((ex) => (
+                    <div key={ex} style={s.exampleLine}>"{ex}"</div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {micError && <div style={s.alertError}>{micError}</div>}
-            <ResultCard result={result} status={status} />
+            {pending ? (
+              <ConfirmCard
+                pending={pending}
+                t={t}
+                lang={lang}
+                onFieldChange={updatePendingField}
+                onConfirm={confirmPending}
+                onDiscard={discardPending}
+                isSaving={status === "processing"}
+              />
+            ) : (
+              <ResultCard result={result} status={status} t={t} lang={lang} />
+            )}
           </div>
         )}
 
@@ -201,7 +349,7 @@ export default function Dashboard() {
               style={s.textarea}
               value={textInput}
               onChange={(e) => setTextInput(e.target.value)}
-              placeholder="e.g. Today I spent 200 on tea and snacks..."
+              placeholder={t.textPlaceholder}
               rows={4}
               onKeyDown={(e) => e.key === "Enter" && e.ctrlKey && sendText()}
             />
@@ -210,35 +358,67 @@ export default function Dashboard() {
               onClick={sendText}
               disabled={!textInput.trim() || status === "processing"}
             >
-              {status === "processing" ? "Processing..." : "→ Log Expense"}
+              {status === "processing" ? t.processing : t.logExpense}
             </button>
-            <ResultCard result={result} status={status} />
+            {pending ? (
+              <ConfirmCard
+                pending={pending}
+                t={t}
+                lang={lang}
+                onFieldChange={updatePendingField}
+                onConfirm={confirmPending}
+                onDiscard={discardPending}
+                isSaving={status === "processing"}
+              />
+            ) : (
+              <ResultCard result={result} status={status} t={t} lang={lang} />
+            )}
+          </div>
+        )}
+
+        {/* Summary Tab */}
+        {activeTab === "summary" && (
+          <div style={s.tabContent}>
+            <SummaryView
+              analytics={analytics}
+              loading={analyticsLoading}
+              error={analyticsError}
+              onRetry={fetchAnalytics}
+              t={t}
+              lang={lang}
+            />
           </div>
         )}
 
         {/* History Tab */}
         {activeTab === "history" && (
           <div style={s.tabContent}>
+            {historyWarning && (
+              <div style={s.alertWarning}>
+                ⚠️ {historyWarning}
+                <button style={s.dismissBtn} onClick={() => setHistoryWarning(null)}>✕</button>
+              </div>
+            )}
             {history.length === 0 ? (
               <div style={s.empty}>
                 <div style={{ fontSize: 48 }}>📭</div>
-                <p>No expenses logged yet this session</p>
+                <p>{t.noHistory}</p>
               </div>
             ) : (
               history.map((item) => (
-                <div key={item.id} style={s.historyCard}>
-                  <div style={{ fontSize: 28 }}>{CATEGORY_ICONS[item.category] || "📦"}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 15 }}>{item.item}</div>
-                    <div style={{ fontSize: 11, color: "#6b6b8a" }}>{item.category} • {item.date}</div>
-                    <div style={{ fontSize: 11, color: "#6b6b8a", fontStyle: "italic", marginTop: 2 }}>
-                      "{item.transcription}"
-                    </div>
-                  </div>
-                  <div style={{ fontWeight: 700, fontSize: 18, color: "#00d4aa", fontFamily: "monospace" }}>
-                    ₹{item.amount}
-                  </div>
-                </div>
+                <HistoryRow
+                  key={item.id}
+                  item={item}
+                  t={t}
+                  lang={lang}
+                  isEditing={editingId === item.id}
+                  editDraft={editDraft}
+                  onStartEdit={() => startEdit(item)}
+                  onCancelEdit={cancelEdit}
+                  onSaveEdit={() => saveEdit(item.id)}
+                  onDelete={() => deleteExpense(item.id)}
+                  onDraftChange={(field, value) => setEditDraft((d) => ({ ...d, [field]: value }))}
+                />
               ))
             )}
           </div>
@@ -255,7 +435,91 @@ export default function Dashboard() {
   );
 }
 
-function ResultCard({ result, status }) {
+// ─── Language toggle ──────────────────────────────────────────────────────────
+function LanguageToggle({ lang, onChange }) {
+  return (
+    <div style={s.langToggle}>
+      <button
+        style={{ ...s.langBtn, ...(lang === "en" ? s.langBtnActive : {}) }}
+        onClick={() => onChange("en")}
+      >
+        EN
+      </button>
+      <button
+        style={{ ...s.langBtn, ...(lang === "ta" ? s.langBtnActive : {}) }}
+        onClick={() => onChange("ta")}
+      >
+        த
+      </button>
+    </div>
+  );
+}
+
+// ─── Confirm card — shown after preview, before anything is saved ───────────
+function ConfirmCard({ pending, t, lang, onFieldChange, onConfirm, onDiscard, isSaving }) {
+  const { transcription, expense } = pending;
+
+  return (
+    <div style={s.confirmCard}>
+      <div style={s.confirmHeading}>{t.confirmHeading}</div>
+      <div style={s.confirmHint}>{t.confirmHint}</div>
+
+      {transcription && (
+        <div style={s.transcriptBox}>"{transcription}"</div>
+      )}
+
+      <div style={s.editGrid}>
+        <label style={s.editLabel}>
+          {t.itemLabel}
+          <input
+            style={s.editInput}
+            value={expense.item}
+            onChange={(e) => onFieldChange("item", e.target.value)}
+          />
+        </label>
+        <label style={s.editLabel}>
+          {t.amountLabel}
+          <input
+            style={s.editInput}
+            type="number"
+            value={expense.amount}
+            onChange={(e) => onFieldChange("amount", e.target.value)}
+          />
+        </label>
+        <label style={s.editLabel}>
+          {t.categoryLabel}
+          <select
+            style={s.editInput}
+            value={expense.category}
+            onChange={(e) => onFieldChange("category", e.target.value)}
+          >
+            {CATEGORY_LIST.map((c) => (
+              <option key={c} value={c}>{categoryLabel(c, lang)}</option>
+            ))}
+          </select>
+        </label>
+        <label style={s.editLabel}>
+          {t.dateLabel}
+          <input
+            style={s.editInput}
+            value={expense.date}
+            onChange={(e) => onFieldChange("date", e.target.value)}
+          />
+        </label>
+      </div>
+
+      <div style={s.confirmActions}>
+        <button style={s.discardBtn} onClick={onDiscard} disabled={isSaving}>{t.discardBtn}</button>
+        <button style={s.confirmBtn} onClick={onConfirm} disabled={isSaving}>
+          {isSaving ? t.processing : t.confirmBtn}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Result card — shown after a confirmed save, or a parse failure ─────────
+function ResultCard({ result, status, t, lang }) {
   if (!result) return null;
   const isError = status === "error" || !result.success;
 
@@ -264,7 +528,7 @@ function ResultCard({ result, status }) {
       <div style={{ fontSize: 24 }}>{isError ? "❌" : "✅"}</div>
       <div>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>
-          {isError ? "Not detected" : "Logged to Google Sheets!"}
+          {isError ? t.notDetected : t.savedToSheets}
         </div>
         {result.transcription && (
           <div style={{ fontSize: 12, color: "#6b6b8a", fontStyle: "italic", marginBottom: 8 }}>
@@ -277,7 +541,7 @@ function ResultCard({ result, status }) {
             {[
               { label: `${CATEGORY_ICONS[result.expense.category] || "📦"} ${result.expense.item}`, color: "#a89fff", bg: "rgba(108,99,255,0.15)" },
               { label: `₹${result.expense.amount}`, color: "#00d4aa", bg: "rgba(0,212,170,0.15)" },
-              { label: result.expense.category, color: "#ffc857", bg: "rgba(255,200,87,0.15)" },
+              { label: categoryLabel(result.expense.category, lang), color: "#ffc857", bg: "rgba(255,200,87,0.15)" },
               { label: `📅 ${result.expense.date}`, color: "#6b6b8a", bg: "#1c1c28" },
             ].map((p) => (
               <span key={p.label} style={{ fontSize: 12, fontWeight: 500, padding: "4px 12px", borderRadius: 20, color: p.color, background: p.bg }}>
@@ -291,6 +555,188 @@ function ResultCard({ result, status }) {
   );
 }
 
+// ─── Summary view — pulls together the analytics endpoint into one tab ──────
+// Mirrors the shape buildAnalytics() returns on the backend:
+// { summary, daily, weekly, monthly, categories, topItems, recentExpenses }
+function SummaryView({ analytics, loading, error, onRetry, t, lang }) {
+  if (loading) {
+    return (
+      <div style={s.empty}>
+        <span style={s.spinner} />
+        <p>{t.summaryLoading}</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={s.empty}>
+        <div style={{ fontSize: 40 }}>⚠️</div>
+        <p>{error}</p>
+        <button style={s.discardBtn} onClick={onRetry}>{t.summaryRetry}</button>
+      </div>
+    );
+  }
+
+  if (!analytics) {
+    return (
+      <div style={s.empty}>
+        <div style={{ fontSize: 48 }}>📊</div>
+        <p>{t.summaryEmpty}</p>
+      </div>
+    );
+  }
+
+  const { summary, categories, topItems, monthly } = analytics;
+  const fmt = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
+  const maxCategoryTotal = categories.length ? Math.max(...categories.map((c) => c.total)) : 0;
+
+  return (
+    <>
+      {/* Quick totals grid */}
+      <div style={s.summaryGrid}>
+        {[
+          { label: t.summaryToday, value: summary.todayTotal, sub: `${summary.todayCount} ${t.transactions}` },
+          { label: t.summaryMonth, value: summary.thisMonthTotal, sub: `${summary.thisMonthCount} ${t.transactions}` },
+          { label: t.summaryAllTime, value: summary.totalAmount, sub: `${summary.totalCount} ${t.transactions}` },
+          { label: t.summaryAvgDay, value: summary.avgPerDay, sub: t.summaryAvgTxn + ": " + fmt(summary.avgPerTransaction) },
+        ].map((card) => (
+          <div key={card.label} style={s.summaryCard}>
+            <div style={s.summaryCardLabel}>{card.label}</div>
+            <div style={s.summaryCardValue}>{fmt(card.value)}</div>
+            <div style={s.summaryCardSub}>{card.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Highest spending day */}
+      {summary.highestDay && (
+        <div style={s.highestDayBanner}>
+          <span>🔥 {t.summaryHighestDay}</span>
+          <span style={{ fontWeight: 700 }}>{summary.highestDay.date} — {fmt(summary.highestDay.total)}</span>
+        </div>
+      )}
+
+      {/* Category breakdown */}
+      {categories.length > 0 && (
+        <div style={s.summarySection}>
+          <div style={s.summarySectionTitle}>{t.summaryByCategory}</div>
+          {categories.map((c) => (
+            <div key={c.name} style={s.categoryRow}>
+              <div style={s.categoryRowTop}>
+                <span>{CATEGORY_ICONS[c.name] || "📦"} {categoryLabel(c.name, lang)}</span>
+                <span style={{ fontWeight: 600 }}>{fmt(c.total)}</span>
+              </div>
+              <div style={s.categoryBarTrack}>
+                <div
+                  style={{
+                    ...s.categoryBarFill,
+                    width: maxCategoryTotal ? `${Math.max(4, (c.total / maxCategoryTotal) * 100)}%` : "0%",
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Top items */}
+      {topItems.length > 0 && (
+        <div style={s.summarySection}>
+          <div style={s.summarySectionTitle}>{t.summaryTopItems}</div>
+          {topItems.map((item) => (
+            <div key={item.item} style={s.topItemRow}>
+              <span>{item.item}</span>
+              <span style={{ color: "#6b6b8a", fontSize: 12 }}>{item.count}x</span>
+              <span style={{ fontWeight: 600, color: "#00d4aa" }}>{fmt(item.total)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Monthly history */}
+      {monthly.length > 0 && (
+        <div style={s.summarySection}>
+          <div style={s.summarySectionTitle}>{t.summaryByMonth}</div>
+          {monthly.map((m) => (
+            <div key={m.key} style={s.topItemRow}>
+              <span>{m.label}</span>
+              <span style={{ color: "#6b6b8a", fontSize: 12 }}>{m.count} {t.transactions}</span>
+              <span style={{ fontWeight: 600 }}>{fmt(m.total)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── History row — view, edit, or delete a confirmed entry ──────────────────
+function HistoryRow({ item, t, lang, isEditing, editDraft, onStartEdit, onCancelEdit, onSaveEdit, onDelete, onDraftChange }) {
+  if (isEditing) {
+    return (
+      <div style={s.historyCard}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
+          <input
+            style={s.editInput}
+            value={editDraft.item}
+            onChange={(e) => onDraftChange("item", e.target.value)}
+            placeholder={t.itemLabel}
+          />
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              style={{ ...s.editInput, flex: 1 }}
+              type="number"
+              value={editDraft.amount}
+              onChange={(e) => onDraftChange("amount", e.target.value)}
+              placeholder={t.amountLabel}
+            />
+            <select
+              style={{ ...s.editInput, flex: 1 }}
+              value={editDraft.category}
+              onChange={(e) => onDraftChange("category", e.target.value)}
+            >
+              {CATEGORY_LIST.map((c) => (
+                <option key={c} value={c}>{categoryLabel(c, lang)}</option>
+              ))}
+            </select>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            <button style={s.discardBtn} onClick={onCancelEdit}>{t.cancelBtn}</button>
+            <button style={s.confirmBtn} onClick={onSaveEdit}>{t.saveBtn}</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={s.historyCard}>
+      <div style={{ fontSize: 28 }}>{CATEGORY_ICONS[item.category] || "📦"}</div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontWeight: 600, fontSize: 15 }}>{item.item}</div>
+        <div style={{ fontSize: 11, color: "#6b6b8a" }}>{categoryLabel(item.category, lang)} • {item.date}</div>
+        {item.transcription && (
+          <div style={{ fontSize: 11, color: "#6b6b8a", fontStyle: "italic", marginTop: 2 }}>
+            "{item.transcription}"
+          </div>
+        )}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+        <div style={{ fontWeight: 700, fontSize: 18, color: "#00d4aa", fontFamily: "monospace" }}>
+          ₹{item.amount}
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button style={s.rowActionBtn} onClick={onStartEdit}>{t.editBtn}</button>
+          <button style={{ ...s.rowActionBtn, color: "#ff8fa3", borderColor: "rgba(255,77,109,0.3)" }} onClick={onDelete}>
+            {t.deleteBtn}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const s = {
   app: { maxWidth: 520, margin: "0 auto", minHeight: "100vh", fontFamily: "'Sora', sans-serif", background: "#0a0a0f", color: "#e8e8f0" },
   header: { background: "#13131a", borderBottom: "1px solid #2a2a3d", padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, zIndex: 10 },
@@ -298,6 +744,9 @@ const s = {
   appName: { fontWeight: 700, fontSize: 18 },
   userEmail: { fontSize: 11, color: "#6b6b8a" },
   headerRight: { display: "flex", gap: 8, alignItems: "center" },
+  langToggle: { display: "flex", background: "#1c1c28", borderRadius: 8, padding: 2, border: "1px solid #2a2a3d" },
+  langBtn: { background: "none", border: "none", color: "#6b6b8a", fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 6, cursor: "pointer", fontFamily: "'Sora',sans-serif" },
+  langBtnActive: { background: "#6c63ff", color: "white" },
   sheetBtn: { fontSize: 12, color: "#00d4aa", textDecoration: "none", background: "rgba(0,212,170,0.1)", border: "1px solid rgba(0,212,170,0.3)", padding: "6px 12px", borderRadius: 8 },
   logoutBtn: { fontSize: 12, color: "#6b6b8a", background: "none", border: "1px solid #2a2a3d", borderRadius: 8, padding: "6px 12px", cursor: "pointer"},
   statsBar: { background: "#13131a", borderBottom: "1px solid #2a2a3d", padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-around" },
@@ -331,5 +780,37 @@ const s = {
   historyCard: { background: "#13131a", border: "1px solid #2a2a3d", borderRadius: 12, padding: 14, display: "flex", alignItems: "center", gap: 12 },
   empty: { textAlign: "center", padding: "60px 20px", color: "#6b6b8a", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 },
   alertError: { padding: "12px 16px", borderRadius: 12, fontSize: 13, background: "#2b0d14", border: "1px solid rgba(255,77,109,0.3)", color: "#ff8fa3" },
+  alertWarning: { padding: "12px 16px", borderRadius: 12, fontSize: 13, background: "#2b220d", border: "1px solid rgba(255,200,87,0.3)", color: "#ffc857", display: "flex", alignItems: "flex-start", gap: 10, justifyContent: "space-between" },
+  dismissBtn: { background: "none", border: "none", color: "#ffc857", cursor: "pointer", fontSize: 13, padding: 0, lineHeight: 1 },
   spinner: { display: "inline-block", width: 20, height: 20, border: "2px solid rgba(255,255,255,0.3)", borderTopColor: "white", borderRadius: "50%", animation: "spin 0.6s linear infinite" },
+
+  // ── Confirm card ──────────────────────────────────────────────────────────
+  confirmCard: { background: "#13131a", border: "1px solid #6c63ff", borderRadius: 14, padding: "18px 18px 16px", animation: "slideUp 0.3s ease", display: "flex", flexDirection: "column", gap: 12 },
+  confirmHeading: { fontWeight: 700, fontSize: 16 },
+  confirmHint: { fontSize: 12, color: "#6b6b8a", marginTop: -8 },
+  transcriptBox: { fontSize: 12, color: "#a89fff", fontStyle: "italic", background: "#1c1c28", border: "1px solid #2a2a3d", borderRadius: 8, padding: "8px 12px" },
+  editGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+  editLabel: { display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "#6b6b8a", textTransform: "uppercase", letterSpacing: 0.5 },
+  editInput: { background: "#1c1c28", border: "1px solid #2a2a3d", borderRadius: 8, color: "#e8e8f0", fontFamily: "'Sora',sans-serif", fontSize: 14, padding: "9px 10px", outline: "none" },
+  confirmActions: { display: "flex", gap: 10, marginTop: 4 },
+  discardBtn: { flex: 1, background: "none", border: "1px solid #2a2a3d", color: "#6b6b8a", borderRadius: 10, padding: "11px 16px", fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "'Sora',sans-serif" },
+  confirmBtn: { flex: 2, background: "linear-gradient(135deg,#00d4aa,#00b894)", border: "none", color: "#06231c", borderRadius: 10, padding: "11px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "'Sora',sans-serif" },
+
+  // ── History row actions ──────────────────────────────────────────────────
+  rowActionBtn: { background: "none", border: "1px solid #2a2a3d", color: "#a89fff", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "'Sora',sans-serif" },
+
+  // ── Summary tab ───────────────────────────────────────────────────────────
+  summaryGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+  summaryCard: { background: "#13131a", border: "1px solid #2a2a3d", borderRadius: 12, padding: "14px 16px" },
+  summaryCardLabel: { fontSize: 11, color: "#6b6b8a", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 },
+  summaryCardValue: { fontSize: 20, fontWeight: 700, color: "#e8e8f0", fontFamily: "monospace" },
+  summaryCardSub: { fontSize: 11, color: "#6b6b8a", marginTop: 4 },
+  highestDayBanner: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,140,66,0.08)", border: "1px solid rgba(255,140,66,0.25)", borderRadius: 10, padding: "10px 14px", fontSize: 13, color: "#ffb37a" },
+  summarySection: { background: "#13131a", border: "1px solid #2a2a3d", borderRadius: 12, padding: "16px 18px" },
+  summarySectionTitle: { fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "#a89fff", marginBottom: 12 },
+  categoryRow: { marginBottom: 12 },
+  categoryRowTop: { display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 },
+  categoryBarTrack: { height: 6, background: "#1c1c28", borderRadius: 4, overflow: "hidden" },
+  categoryBarFill: { height: "100%", background: "linear-gradient(90deg,#6c63ff,#9b5de5)", borderRadius: 4 },
+  topItemRow: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, padding: "8px 0", borderBottom: "1px solid #1c1c28" },
 };
