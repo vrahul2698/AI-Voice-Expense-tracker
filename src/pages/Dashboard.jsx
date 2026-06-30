@@ -26,6 +26,7 @@ export default function Dashboard() {
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const processingRef = useRef(false);
 
   // Language preference — defaults to whatever the backend has saved for
@@ -236,9 +237,20 @@ export default function Dashboard() {
               📊 {t.openSheet}
             </a>
           )}
+          <button onClick={() => setSettingsOpen(true)} style={s.iconBtn} aria-label={t.settingsTitle}>
+            ⚙️
+          </button>
           <button onClick={logout} style={s.logoutBtn}>{t.signOut}</button>
         </div>
       </header>
+
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        user={user}
+        t={t}
+        refreshUser={refreshUser}
+      />
 
       {/* Stats bar */}
       <div style={s.statsBar}>
@@ -671,6 +683,134 @@ function SummaryView({ analytics, loading, error, onRetry, t, lang }) {
   );
 }
 
+// ─── Settings panel — WhatsApp number + reminder/summary toggles ───────────
+// A slide-in drawer rather than a tab, since this is account configuration
+// the user visits occasionally, not a content view they switch between.
+function SettingsPanel({ open, onClose, user, t, refreshUser }) {
+  const [number, setNumber] = useState(user?.whatsappNumber || "");
+  const [remindersEnabled, setRemindersEnabled] = useState(user?.remindersEnabled ?? true);
+  const [summaryEnabled, setSummaryEnabled] = useState(user?.summaryEnabled ?? true);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [saved, setSaved] = useState(false);
+
+  // Re-sync local form state whenever the panel is (re)opened, so it always
+  // reflects the latest saved values rather than stale state from before.
+  useEffect(() => {
+    if (open) {
+      setNumber(user?.whatsappNumber || "");
+      setRemindersEnabled(user?.remindersEnabled ?? true);
+      setSummaryEnabled(user?.summaryEnabled ?? true);
+      setSaveError(null);
+      setSaved(false);
+    }
+  }, [open, user]);
+
+  if (!open) return null;
+
+  const digitsOnly = number.replace(/\D/g, "");
+  const isValid = digitsOnly.length === 0 || (digitsOnly.length >= 10 && digitsOnly.length <= 15);
+
+  const handleSave = async () => {
+    if (!isValid) return;
+    setSaving(true);
+    setSaveError(null);
+    setSaved(false);
+    try {
+      await axios.patch("/auth/whatsapp", {
+        whatsappNumber: digitsOnly || null,
+        remindersEnabled,
+        summaryEnabled,
+      });
+      refreshUser();
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err.response?.data?.error || "Could not save settings.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <div style={s.drawerOverlay} onClick={onClose} />
+      <div style={s.drawer}>
+        <div style={s.drawerHeader}>
+          <div style={s.drawerTitle}>⚙️ {t.settingsTitle}</div>
+          <button style={s.drawerCloseBtn} onClick={onClose} aria-label={t.cancelBtn}>✕</button>
+        </div>
+
+        <div style={s.drawerBody}>
+          <div style={s.settingsSection}>
+            <label style={s.editLabel}>
+              {t.whatsappLabel}
+              <input
+                style={s.editInput}
+                type="tel"
+                inputMode="numeric"
+                value={number}
+                onChange={(e) => setNumber(e.target.value)}
+                placeholder={t.whatsappPlaceholder}
+              />
+            </label>
+            <div style={s.settingsHint}>{t.whatsappHint}</div>
+            {!isValid && <div style={{ ...s.settingsHint, color: "#ff8fa3" }}>{t.whatsappInvalid}</div>}
+          </div>
+
+          <div style={s.settingsSection}>
+            <ToggleRow
+              label={t.remindersToggleLabel}
+              hint={t.remindersToggleHint}
+              checked={remindersEnabled}
+              onChange={setRemindersEnabled}
+            />
+            <ToggleRow
+              label={t.summaryToggleLabel}
+              hint={t.summaryToggleHint}
+              checked={summaryEnabled}
+              onChange={setSummaryEnabled}
+            />
+          </div>
+
+          {saveError && <div style={s.alertError}>{saveError}</div>}
+          {saved && !saveError && (
+            <div style={{ ...s.alertWarning, background: "#0d2b1e", borderColor: "rgba(0,212,170,0.3)", color: "#00d4aa" }}>
+              ✅ {t.settingsSaved}
+            </div>
+          )}
+
+          <button
+            style={{ ...s.confirmBtn, width: "100%", opacity: saving || !isValid ? 0.6 : 1 }}
+            onClick={handleSave}
+            disabled={saving || !isValid}
+          >
+            {saving ? t.processing : t.saveBtn}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ToggleRow({ label, hint, checked, onChange }) {
+  return (
+    <div style={s.toggleRow}>
+      <div style={{ flex: 1 }}>
+        <div style={s.toggleLabel}>{label}</div>
+        <div style={s.settingsHint}>{hint}</div>
+      </div>
+      <button
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        style={{ ...s.toggleSwitch, ...(checked ? s.toggleSwitchOn : {}) }}
+      >
+        <span style={{ ...s.toggleKnob, ...(checked ? s.toggleKnobOn : {}) }} />
+      </button>
+    </div>
+  );
+}
+
 // ─── History row — view, edit, or delete a confirmed entry ──────────────────
 function HistoryRow({ item, t, lang, isEditing, editDraft, onStartEdit, onCancelEdit, onSaveEdit, onDelete, onDraftChange }) {
   if (isEditing) {
@@ -813,4 +953,21 @@ const s = {
   categoryBarTrack: { height: 6, background: "#1c1c28", borderRadius: 4, overflow: "hidden" },
   categoryBarFill: { height: "100%", background: "linear-gradient(90deg,#6c63ff,#9b5de5)", borderRadius: 4 },
   topItemRow: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, padding: "8px 0", borderBottom: "1px solid #1c1c28" },
+
+  // ── Settings drawer ──────────────────────────────────────────────────────
+  iconBtn: { fontSize: 14, background: "none", border: "1px solid #2a2a3d", borderRadius: 8, padding: "6px 10px", cursor: "pointer", lineHeight: 1 },
+  drawerOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 20 },
+  drawer: { position: "fixed", top: 0, right: 0, bottom: 0, width: "min(360px, 100vw)", background: "#13131a", borderLeft: "1px solid #2a2a3d", zIndex: 21, display: "flex", flexDirection: "column", animation: "slideUp 0.25s ease" },
+  drawerHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 20px", borderBottom: "1px solid #2a2a3d" },
+  drawerTitle: { fontWeight: 700, fontSize: 16 },
+  drawerCloseBtn: { background: "none", border: "none", color: "#6b6b8a", fontSize: 16, cursor: "pointer", padding: 4 },
+  drawerBody: { padding: 20, display: "flex", flexDirection: "column", gap: 20, overflowY: "auto" },
+  settingsSection: { display: "flex", flexDirection: "column", gap: 10 },
+  settingsHint: { fontSize: 11, color: "#6b6b8a", lineHeight: 1.5 },
+  toggleRow: { display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid #1c1c28" },
+  toggleLabel: { fontSize: 13, fontWeight: 600, marginBottom: 2 },
+  toggleSwitch: { width: 42, height: 24, borderRadius: 12, background: "#2a2a3d", border: "none", cursor: "pointer", position: "relative", flexShrink: 0, padding: 0 },
+  toggleSwitchOn: { background: "#00d4aa" },
+  toggleKnob: { position: "absolute", top: 3, left: 3, width: 18, height: 18, borderRadius: "50%", background: "#e8e8f0", transition: "left 0.15s ease" },
+  toggleKnobOn: { left: 21 },
 };
